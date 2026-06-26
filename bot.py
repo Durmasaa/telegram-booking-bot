@@ -1,34 +1,29 @@
 import os
-import json
 import time
 import requests
 import traceback
 from datetime import datetime
-
-import gspread
-from google.oauth2.service_account import Credentials
 
 
 # =========================
 # НАСТРОЙКИ ИЗ RENDER
 # =========================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+SHEET_WEBAPP_URL = os.getenv("SHEET_WEBAPP_URL", "").strip()
+APPS_SCRIPT_SECRET = os.getenv("APPS_SCRIPT_SECRET", "").strip()
+TABLE_URL = os.getenv("TABLE_URL", "").strip()
 
 if not BOT_TOKEN:
-    raise Exception("Не найден BOT_TOKEN в переменных Render")
+    raise Exception("Не найден BOT_TOKEN в Render Environment Variables")
 
-if not SPREADSHEET_ID:
-    raise Exception("Не найден SPREADSHEET_ID в переменных Render")
+if not SHEET_WEBAPP_URL:
+    raise Exception("Не найден SHEET_WEBAPP_URL в Render Environment Variables")
 
-if not GOOGLE_CREDENTIALS_JSON:
-    raise Exception("Не найден GOOGLE_CREDENTIALS_JSON в переменных Render")
+if not APPS_SCRIPT_SECRET:
+    raise Exception("Не найден APPS_SCRIPT_SECRET в Render Environment Variables")
 
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
-WORKSHEET_NAME = "Заявки"
 
 OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 if OWNER_CHAT_ID:
@@ -36,137 +31,67 @@ if OWNER_CHAT_ID:
 
 USER_STATES = {}
 
-SPREADSHEET = None
-WORKSHEET = None
-SPREADSHEET_URL = None
-
 
 # =========================
-# GOOGLE SHEETS
+# ЗАПИСЬ В GOOGLE ТАБЛИЦУ ЧЕРЕЗ APPS SCRIPT
 # =========================
 
-def setup_sheet():
-    global SPREADSHEET, WORKSHEET, SPREADSHEET_URL
+def send_to_sheet(data):
+    payload = dict(data)
+    payload["secret"] = APPS_SCRIPT_SECRET
 
-    print("Подключаю Google Таблицу...")
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-
-    credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
-    credentials = Credentials.from_service_account_info(
-        credentials_info,
-        scopes=scopes
+    response = requests.post(
+        SHEET_WEBAPP_URL,
+        json=payload,
+        timeout=30
     )
 
-    gc = gspread.authorize(credentials)
-
-    spreadsheet = gc.open_by_key(SPREADSHEET_ID)
+    text = response.text
+    print("Ответ Apps Script:", text)
 
     try:
-        worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
-        print("Лист найден:", WORKSHEET_NAME)
-    except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(
-            title=WORKSHEET_NAME,
-            rows=1000,
-            cols=12
-        )
-        print("Создан лист:", WORKSHEET_NAME)
+        result = response.json()
+    except Exception:
+        raise Exception("Apps Script вернул не JSON: " + text)
 
-    headers = [
-        "Дата",
-        "Тип",
-        "Chat ID",
-        "Username",
-        "Имя",
-        "Телефон",
-        "Услуга",
-        "День",
-        "Время",
-        "Статус",
-        "Комментарий"
-    ]
+    if not result.get("ok"):
+        raise Exception("Apps Script error: " + str(result))
 
-    values = worksheet.get_all_values()
-
-    if not values:
-        worksheet.append_row(headers, value_input_option="USER_ENTERED")
-        print("Заголовки добавлены.")
-
-    SPREADSHEET = spreadsheet
-    WORKSHEET = worksheet
-    SPREADSHEET_URL = spreadsheet.url
-
-    print("Таблица готова:")
-    print(SPREADSHEET_URL)
-
-
-def append_row_to_sheet(row):
-    global WORKSHEET
-
-    if WORKSHEET is None:
-        setup_sheet()
-
-    WORKSHEET.append_row(row, value_input_option="USER_ENTERED")
-    print("Строка добавлена в таблицу:")
-    print(row)
+    return result
 
 
 def add_manual_test_row(chat_id=None):
-    row = [
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "MANUAL TEST",
-        str(chat_id or "TEST"),
-        "",
-        "Тестовая строка",
-        "89999999999",
-        "Проверка таблицы",
-        "Понедельник",
-        "10:00",
-        "Тест",
-        "Если эта строка появилась — команда теста работает"
-    ]
+    data = {
+        "type": "MANUAL TEST",
+        "chat_id": str(chat_id or "TEST"),
+        "username": "",
+        "name": "Тестовая строка",
+        "phone": "89999999999",
+        "service": "Проверка таблицы",
+        "day": "Понедельник",
+        "time": "10:00",
+        "status": "Тест",
+        "comment": "Если эта строка появилась — Render пишет в таблицу"
+    }
 
-    append_row_to_sheet(row)
+    send_to_sheet(data)
 
 
 def add_lead_to_sheet(chat_id, username, state):
-    row = [
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "ЗАЯВКА",
-        str(chat_id),
-        username or "",
-        state.get("name", ""),
-        state.get("phone", ""),
-        state.get("service", ""),
-        state.get("day", ""),
-        state.get("time", ""),
-        "Новая",
-        ""
-    ]
+    data = {
+        "type": "ЗАЯВКА",
+        "chat_id": str(chat_id),
+        "username": username or "",
+        "name": state.get("name", ""),
+        "phone": state.get("phone", ""),
+        "service": state.get("service", ""),
+        "day": state.get("day", ""),
+        "time": state.get("time", ""),
+        "status": "Новая",
+        "comment": ""
+    }
 
-    append_row_to_sheet(row)
-
-
-def count_leads():
-    if WORKSHEET is None:
-        setup_sheet()
-
-    values = WORKSHEET.get_all_values()
-
-    if len(values) <= 1:
-        return 0
-
-    count = 0
-
-    for row in values[1:]:
-        if len(row) > 1 and row[1] == "ЗАЯВКА":
-            count += 1
-
-    return count
+    send_to_sheet(data)
 
 
 # =========================
@@ -450,7 +375,6 @@ def send_help(chat_id):
         "/setowner — получать заявки в этот чат\n"
         "/table — ссылка на таблицу\n"
         "/testsheet — тестовая строка в таблицу\n"
-        "/stats — количество заявок\n"
         "/reset — сбросить диалог",
         main_keyboard()
     )
@@ -511,8 +435,8 @@ def notify_owner(client_chat_id, username, state):
         "✅ Заявка добавлена в таблицу."
     )
 
-    if SPREADSHEET_URL:
-        text += f"\n\n📄 Таблица:\n{SPREADSHEET_URL}"
+    if TABLE_URL:
+        text += f"\n\n📄 Таблица:\n{TABLE_URL}"
 
     send_message(OWNER_CHAT_ID, text)
 
@@ -556,25 +480,19 @@ def handle_message(message):
         )
         return
 
-    if text in ["/table", "📄 Таблица"]:
-        send_message(chat_id, f"📄 Таблица заявок:\n{SPREADSHEET_URL}")
+    if text == "/table":
+        if TABLE_URL:
+            send_message(chat_id, f"📄 Таблица заявок:\n{TABLE_URL}")
+        else:
+            send_message(chat_id, "Таблица подключена через Apps Script. Ссылку TABLE_URL можно добавить в Render.")
         return
 
-    if text == "/stats":
-        try:
-            total = count_leads()
-            send_message(chat_id, f"📊 Всего заявок: <b>{total}</b>")
-        except Exception as e:
-            send_message(chat_id, f"❌ Ошибка статистики:\n<code>{str(e)}</code>")
-        return
-
-    if text in ["/testsheet", "🧪 Тест таблицы"]:
+    if text == "/testsheet":
         try:
             add_manual_test_row(chat_id)
             send_message(
                 chat_id,
-                "✅ Тестовая строка добавлена в таблицу.\n\n"
-                f"Открой:\n{SPREADSHEET_URL}",
+                "✅ Тестовая строка добавлена в таблицу.",
                 main_keyboard()
             )
         except Exception as e:
@@ -743,7 +661,6 @@ def handle_message(message):
 # =========================
 
 def run_bot():
-    setup_sheet()
     delete_webhook()
 
     offset = None
@@ -751,7 +668,6 @@ def run_bot():
     print("Бот запущен.")
     print("Напиши в Telegram /start")
     print("Потом /setowner")
-    print("Таблица:", SPREADSHEET_URL)
 
     while True:
         try:
